@@ -24,7 +24,7 @@ $Password = Read-Host "Enter Windows password" -AsSecureString
 $PasswordPlain = [System.Net.NetworkCredential]::new("", $Password).Password
 Write-Host "Updating autounattend.xml with Username=$Username and Password=*****"
 
-# --- Step 2: Update copied XML
+# --- Step 2: Update copied XML and add MAS_AIO
 # Create temp folder and copy XML into it
 if (Test-Path $TempFolder) { Remove-Item $TempFolder -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $TempFolder | Out-Null
@@ -48,17 +48,15 @@ foreach ($pair in $replacements.GetEnumerator()) {
 # Write the modified content back WITHOUT BOM
 $Utf8NoBomEncoding = New-Object System.Text.UTF8Encoding $False
 [System.IO.File]::WriteAllText($UnattendXMLCOPY, $fileContent, $Utf8NoBomEncoding)
-
 Write-Output "Replacements completed successfully in $UnattendXMLCOPY"
 
 # --- Step 3: Create unattend.iso using oscdimg
-
 if (Test-Path $OSCDIMG) {
-    & $OSCDIMG -n -m -d "$TempFolder" "$UnattendISO"
+    Start-Process -FilePath $OSCDIMG -ArgumentList '-n -m -d "$TempFolder" "$UnattendISO"' -WindowStyle Hidden -Wait
 }
+Write-Output "unattend.iso has been created."
 
 # --- Step 4: Create VM folder (unchanged) ---
-
 $VMName = $Username
 $VMPath = Join-Path $VMsDir $VMName
 if (Test-Path $VMPath) {
@@ -69,16 +67,17 @@ New-Item -ItemType Directory -Force -Path $VMPath | Out-Null
 
 # --- Step 5: Create virtual disk (Single-file, SATA adapter) ---
 Write-Host "Creating $DiskGB GB single-file disk (type 0)..."
-# CRITICAL FIX: -t 0 is Monolithic Sparse (Single File, Growable)
-# Monolithic Flat (Pre-allocated, single file) is -t 2
+
+# Creating a monolithic disk (-t 0)
 & $VDISK_MANAGER -c -s ${DiskGB}GB -a sata -t 0 "$VMPath\$VMName.vmdk"
 
-# --- Step 6: Build VMX file (CRITICAL FIX: Explicit, stable config to prevent UI crash) ---
+# --- Step 6: Build VMX file for VMware Workstation 25H2 (virtualHW 22) ---
 $UnattendISOabs = (Resolve-Path $UnattendISO).Path
+
 $vmxContent = @"
 .encoding = "UTF-8"
 config.version = "8"
-virtualHW.version = "19"
+virtualHW.version = "22"
 virtualHW.productCompatibility = "hosted"
 displayName = "$VMName"
 guestOS = "windows11-64"
@@ -87,32 +86,40 @@ numvcpus = "$CPUs"
 
 # --- Firmware and TPM ---
 firmware = "efi"
-efi.secureBoot.enabled = "TRUE"
 managedVM.autoAddVTPM = "software"
 
 # --- Disable legacy devices ---
 floppy0.present = "FALSE"
-parallel0.present = "FALSE"
 
-# --- PCI Bridges (safe set; same as VMware default) ---
+# --- PCI Bridges (required for virtualHW 22) ---
 pciBridge0.present = "TRUE"
 pciBridge4.present = "TRUE"
 pciBridge4.virtualDev = "pcieRootPort"
+pciBridge4.functions = "8"
 pciBridge5.present = "TRUE"
 pciBridge5.virtualDev = "pcieRootPort"
+pciBridge5.functions = "8"
 pciBridge6.present = "TRUE"
 pciBridge6.virtualDev = "pcieRootPort"
+pciBridge6.functions = "8"
 pciBridge7.present = "TRUE"
 pciBridge7.virtualDev = "pcieRootPort"
+pciBridge7.functions = "8"
+
+# --- VMCI and HPET (required for virtualHW 22) ---
+vmci0.present = "TRUE"
+hpet0.present = "TRUE"
+
+# --- Power Management ---
+powerType.powerOff = "soft"
+powerType.powerOn = "soft"
+powerType.suspend = "soft"
+powerType.reset = "soft"
 
 # --- SATA storage controller ---
 sata0.present = "TRUE"
-sata0.deviceType = "ahci"
 sata0:0.present = "TRUE"
 sata0:0.fileName = "$VMName.vmdk"
-sata0:0.deviceType = "disk"
-
-# --- Attach installation and unattend media ---
 sata0:1.present = "TRUE"
 sata0:1.fileName = "$WinISOabs"
 sata0:1.deviceType = "cdrom-image"
@@ -123,45 +130,31 @@ sata0:3.present = "TRUE"
 sata0:3.fileName = "$VMToolsISO"
 sata0:3.deviceType = "cdrom-image"
 
-# --- USB 3.1 Controller ---
+# --- USB Controllers ---
 usb.present = "TRUE"
-ehci.present = "FALSE"
+ehci.present = "TRUE"
 usb_xhci.present = "TRUE"
-usb.generic.allowHID = "TRUE"
-usb.generic.allowLastHID = "TRUE"
-usb.restrictions.defaultAllow = "TRUE"
 
-# --- Default network adaptor ---
+# --- Network ---
 ethernet0.present = "TRUE"
-ethernet0.connectionType = "nat" # Bridged if not included
+ethernet0.connectionType = "nat"
 ethernet0.virtualDev = "e1000e"
-ethernet0.wakeOnPcktRcv = "FALSE"
-# ethernet1.present = "TRUE"
-# ethernet1.connectionType = "custom"
-# ethernet1.virtualDev = "e1000e"
-# ethernet1.vnet = "VMnet12"
-# ethernet1.displayName = "VMnet12"
 
-# --- Boot order ---
-bios.bootorder = "sata0:1"
-
-# --- Guest tools / stability
-tools.syncTime = "TRUE"
-tools.upgrade.policy = "manual"
-isolation.tools.unity.disable = "TRUE"
-
-# --- Clean up disks after shutting down
-diskCleanup.automatic = "TRUE"
-
-# --- Add Sound Card ---
+# --- Sound ---
 sound.present = "TRUE"
 sound.fileName = "-1"
-sound.autodetect = "TRUE"
+sound.autoDetect = "TRUE"
 sound.virtualDev = "hdaudio"
+
+# --- Tools and Sync ---
+tools.syncTime = "FALSE"
+tools.upgrade.policy = "manual"
 "@
 
 $vmxFile = "$VMPath\\$VMName.vmx"
 $vmxContent | Out-File -Encoding UTF8 $vmxFile
+
+Write-Host "VMX configuration generated with virtualHW.version 22 for VMware Workstation 25H2"
 
 # --- Step 7: Open VM in GUI and prompt user to complete setup ---
 Write-Host "--- VM Creation Complete ---"
@@ -172,5 +165,6 @@ Write-Host "The VMX file will now open in VMware Workstation Pro."
 Start-Process "$vmxFile"
 
 Write-Host "----------------------------------------------------------------------------------------------------------------"
+Write-Host "MANUAL STEPS REQUIRED:"
 Write-Host "Click 'Power on this virtual machine', then quickly click into the VM window and **press any key** to start the Windows installation."
 Write-Host "----------------------------------------------------------------------------------------------------------------"
