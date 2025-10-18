@@ -71,10 +71,9 @@ Write-Host "Creating $DiskGB GB single-file disk (type 0)..."
 # Creating a monolithic disk (-t 0)
 & $VDISK_MANAGER -c -s ${DiskGB}GB -a sata -t 0 "$VMPath\$VMName.vmdk"
 
-# --- Step 5.5: Detect VMware Workstation version and determine virtualHW version ---
+# --- # --- Step 5.5: Detect VMware Workstation version ---
 $vmwareExe = "$VMWARE_PATH\vmware.exe"
-$virtualHWVersion = "19" # Default fallback
-$isModernVersion = $false # Flag for version 25+
+$virtualHWVersion = "22" # Default to latest
 
 if (Test-Path $vmwareExe) {
     try {
@@ -102,44 +101,28 @@ if (Test-Path $vmwareExe) {
                 }
                 25 { 
                     $virtualHWVersion = "22"
-                    $isModernVersion = $true
                 }
                 default {
-                    # Unknown version - check if it's likely newer than 25
+                    # Unknown version - use latest
                     if ($majorVersion -gt 25) {
                         $virtualHWVersion = "22"
-                        $isModernVersion = $true
-                        Write-Host "Unknown future VMware version $majorVersion.$minorVersion, using latest virtualHW.version = $virtualHWVersion"
-                    } else {
-                        Write-Host "Unknown VMware version $majorVersion.$minorVersion, using default virtualHW.version = $virtualHWVersion"
                     }
+                    Write-Host "Unknown VMware version $majorVersion.$minorVersion, using virtualHW.version = $virtualHWVersion"
                 }
             }
             
-            if ($majorVersion -le 25) {
-                Write-Host "Using virtualHW.version = $virtualHWVersion for VMware Workstation $majorVersion.$minorVersion"
-            } else {
-                # For unknown versions, check if it's likely newer
-                if ($majorVersion -ge 25) {
-                    $virtualHWVersion = "22"
-                    $isModernVersion = $true
-                    Write-Host "Unknown modern VMware version $majorVersion, using latest virtualHW.version = $virtualHWVersion"
-                } else {
-                    Write-Host "Unknown VMware version $majorVersion, using default virtualHW.version = $virtualHWVersion"
-                }
-            }
+            Write-Host "Using virtualHW.version = $virtualHWVersion for VMware Workstation $majorVersion.$minorVersion"
         }
     } catch {
         Write-Warning "Could not detect VMware version, using default virtualHW.version = $virtualHWVersion"
     }
 } else {
-    Write-Warning "vmware.exe not found at $vmwareExe, using default virtualHW.version = $virtualHWVersion"
+    Write-Warning "vmware.exe not found, using default virtualHW.version = $virtualHWVersion"
 }
 
-# --- Step 6: Build VMX file with version-specific settings ---
+# --- Step 6: Build VMX file (settings compatible with VMware 16.x, 17.x, and 25H2) ---
 $UnattendISOabs = (Resolve-Path $UnattendISO).Path
 
-# Common settings for all versions
 $vmxContent = @"
 .encoding = "UTF-8"
 config.version = "8"
@@ -161,34 +144,26 @@ floppy0.present = "FALSE"
 pciBridge0.present = "TRUE"
 pciBridge4.present = "TRUE"
 pciBridge4.virtualDev = "pcieRootPort"
+pciBridge4.functions = "8"
 pciBridge5.present = "TRUE"
 pciBridge5.virtualDev = "pcieRootPort"
+pciBridge5.functions = "8"
 pciBridge6.present = "TRUE"
 pciBridge6.virtualDev = "pcieRootPort"
+pciBridge6.functions = "8"
 pciBridge7.present = "TRUE"
 pciBridge7.virtualDev = "pcieRootPort"
-"@
-
-# Add modern-version-specific settings (version 25H2+, virtualHW 22+)
-if ($isModernVersion) {
-    $vmxContent += @"
-
-# --- Modern version features (VMware 25+) ---
-pciBridge4.functions = "8"
-pciBridge5.functions = "8"
-pciBridge6.functions = "8"
 pciBridge7.functions = "8"
+
+# --- VMCI and HPET ---
 vmci0.present = "TRUE"
 hpet0.present = "TRUE"
+
+# --- Power Management ---
 powerType.powerOff = "soft"
 powerType.powerOn = "soft"
 powerType.suspend = "soft"
 powerType.reset = "soft"
-"@
-}
-
-# Continue with common settings
-$vmxContent += @"
 
 # --- SATA storage controller ---
 sata0.present = "TRUE"
